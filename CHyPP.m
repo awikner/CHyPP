@@ -1,5 +1,155 @@
-function [pool_size,avg_pred_length] = CHyPP(varargin)
+function [pool_size,avg_pred_length,filename,filename_rms] = CHyPP(varargin)
+% CHyPP (Combined Hybrid Parallel Prediction) - executes the CHyPP
+% algorithm (training and prediction) using MATLAB's parallel computing 
+% toolbox. If you don't have access to this toolbox, you can run the
+% slower serialized version of this code instead (CHyPP_serial). This
+% function takes inputs in the form of string-input pairs. If an input
+% value is not specified, then CHyPP uses the default value specified
+% below. Ex. CHyPP('NumRes',4,'Noise',1e-3)
+%
+% Inputs:
+%   PoolSize - number of CPU cores to be used for computation. This number
+%              divide NumRes (total number of reservoirs). Default: 1
+%
+%   NumRes - total number of reservoirs to be used in the prediction (P).
+%            Default: 1
+%
+%   TrainLength - number of system measurements in training time series
+%                 (t_0/(\Delta t)). Default: Length of data sequence given
+%                 by TrainFile.
+%
+%   ReservoirSize - number of nodes in each reservoir (D_r). Default: 1000
+%
+%   AvgDegree - average in-degree of each reservoir adjacency matrix (<d>).
+%               Default: 3
+%
+%   LocalOverlap - number of grid points in each local overlap region (l).
+%                  Default: 0
+%
+%   InputWeight - scaling of nonzero elements in input matrices (\sigma).
+%                 Default: 1
+%
+%   SpectralRadius - spectral radius (maximum absolute eigenvalue) of each
+%                    reservoir adjacency matrix (\rho). Default: 0.6
+%
+%   Noise - added training noise standard deviation (s). Default: 0
+%
+%   RidgeReg - L^2 regularization parameter used during Ridge Regression to
+%              determine each output matrix W_{out}. Should be kept small.
+%              Default: 1e-4
+%              NOTE: CHyPP allows for separate regularization parameters
+%              for the knowledge-based model variables and reservoir node
+%              states. While the current codes set both to the same value,
+%              this could be easily modified without changing any of the
+%              computation.
+%
+%   Predictions - number of predictions to be made after training. 
+%                 Default: 10
+%
+%   PredictLength - length of each prediction in t/(\Delta t). 
+%                   Default: 1000
+%
+%   TrainSteps - number of steps over which the outer product matrices used
+%                to compute each W_{out} are calculated. This number must 
+%                divide TrainLength. Default: 50
+%
+%   ResOnly - boolean value indicating whether to perform a CHyPP or
+%             "reservoirs-only" prediction (Pathak et. al. 2018). To use 
+%             CHyPP, set to true; to use reservoirs-only, set to false.
+%             Default: true
+%             NOTE: If set to true, you MUST input a ModelParams struct as
+%             well.
+%
+%   RunIter - seed for random generation of reservoir adjacency matrices.
+%             Default: 1
+%
+%   OutputData - boolean indicating whether data from the predictions
+%                should be output in the form of two files whose names are 
+%                given by filename and filename_rms. See Outputs for more 
+%                information. Default: true
+%
+%   TrainFile - name of full path to .mat file containing the variables
+%               train_input_sequence, noise, datamean, and datavar. These
+%               variables correspond to a (training time series length) by
+%               (system size) matrix containing the training data to be
+%               used with overall mean 0 and standard deviation 1, a matrix
+%               of equal size containing independent gaussian random
+%               variables of standard deviation 1, the mean of the original
+%               data, and the standard deviation of the original data.
+%               Default: 'KS_data/KS_train_input_sequence.mat' 
+%               NOTE: To ensure proper loading during parallel execution,
+%               make sure to save all .mat files using the '-v7.3' flag.
+%
+%   TestFile - name of full path to .mat file containing the variables
+%              test_input_sequence, datamean, and datavar. These variables
+%              correspond to a (test time series length) by (system size)
+%              matrix containing the data that predictions are tested
+%              against with mean 0 and standard deviation 1, the mean of
+%              the original training data, and the standard deviation of
+%              the original training data.
+%              Default: 'KS_Data/KS_test_input_sequence.mat'
+%              NOTE: To ensure proper loading during parallel execution,
+%              make sure to save all .mat files using the '-v7.3' flag.
+%
+%   StartFile - name of full path to .mat file containing the variable
+%               start_iter. This variable corresponds to the indices in the
+%               test data set that synchonization and prediction begin at.
+%               Default: 'KS_Data/KS_pred_start_indices.mat'
+%               NOTES: To ensure proper loading during parallel execution,
+%               make sure to save all .mat files using the '-v7.3' flag.
+%               start_iter should be generated such that there are an equal
+%               or greater number of elements than Prediction and such that
+%               no element exceeds the length of the test data set - the
+%               synchronization time - the prediction time.
+%
+%   ModelParams - struct whose fields contain the parameters necessary to
+%                 execute the knowledge-based predictor component of
+%                 CHyPP. The following fields are required by CHyPP:
+%
+%                 ModelParams.predict - contains a function handle to the
+%                 imperfect knowledge-based predictor. This function must
+%                 have two inputs, the initial state of the system and the
+%                 ModelParams struct, and must produce one output, the
+%                 prediction of the full system state after time \Delta t.
+%
+%                 ModelParams.prediction - contains a function handle to
+%                 the iterated knowledge-based predictor. This function
+%                 must have two inputs, the initial state of the system
+%                 and the ModelParams struct, and must produce one output,
+%                 a matrix whose j+1^th column contains the knowledge-based
+%                 prediction of the system state at time j\Delta t after
+%                 the initial condition (first column is just the initial
+%                 condition). In addition, this output matrix must have
+%                 PredictLength+1 columns for the comparison to work
+%                 correctly.
+%                 Default: 0 (no struct)
+%
+%   TestModelParams - a ModelParams type struct that, if given, is used
+%                     in place of the CHyPP ModelParams struct when
+%                     comparing CHyPP predictions to the knowledge-based
+%                     model.
+%                     Default: 0 (no struct)
+%
+%   OutputLocation - specifies the location where the output files should
+%                    be saved (if applicable). Default: KS_Data
+%
+% Outputs:
+%   pool_size - number of cores used for parallel prediction
+%
+%   avg_pred_length - (average valid time of prediction)/(\Delta t) over
+%                     all of the predictions
+%
+%   filename - full path to output file containing full predictions and
+%              CHyPP parameters after training.
+%
+%   filename_rms - full path to output file containing RMS prediction 
+%                  error, valid time for each prediction, and similar
+%                  output using just the knowledge-based model (when
+%                  specified).
+
+%% Set default parameter values
 pool_size = 1;
+num_res_in = 1;
 train_lengthin = 0;
 reservoir_sizein = 1000;
 avg_degreein = 3;
@@ -16,14 +166,21 @@ trainfilename_in = 'KS_Data/KS_train_input_sequence.mat';
 testfilename_in = 'KS_Data/KS_test_input_sequence.mat';
 startfilename_in = 'KS_Data/KS_pred_start_indices.mat';
 outputlocation = 'KS_Data';
+typeflag_in = 'reservoir';
 ModelParams = 0;
 TestModelParams = 0;
+predictions_in = 10;
+predict_length_in = 1000;
+train_steps_in = 50;
 
 
+%% Parse inputs, assign to parameters, and check parameter compatibility
 for arg = 1:numel(varargin)/2
     switch varargin{2*(arg-1)+1}
         case 'PoolSize'
             pool_size = varargin{2*arg};
+        case 'NumRes'
+            num_res_in = varargin{2*arg};
         case 'TrainLength'
             train_lengthin = varargin{2*arg};
         case 'ReservoirSize'
@@ -41,6 +198,12 @@ for arg = 1:numel(varargin)/2
         case 'RidgeReg'
             betain_res = varargin{2*arg};
             betain_model = varargin{2*arg};
+        case 'Predictions'
+            predictions_in = varargin{2*arg};
+        case 'PredictLength'
+            predict_length_in = varargin{2*arg};
+        case 'TrainSteps'
+            train_steps_in = varargin{2*arg};
         case 'ResOnly'
             if varargin{2*arg}
                 typeflag_in = 'reservoir';
@@ -71,7 +234,10 @@ end
 
 assert(~(strcmp(typeflag_in,'hybrid') & ~isstruct(ModelParams)),...
     'CHyPP has been told to run in a hybrid configuration, but no ModelParams struct has been given as input.')
+assert(mod(num_res_in/pool_size,1)==0, 'Number of cores must divide number of reservoirs used.')
 
+%% Send parameters to each worker
+num_res = Composite(pool_size);
 avg_degree = Composite(pool_size);
 sigma_res = Composite(pool_size);
 radius = Composite(pool_size);
@@ -86,8 +252,12 @@ typeflag = Composite(pool_size);
 trainfilename = Composite(pool_size);
 testfilename  = Composite(pool_size);
 startfilename = Composite(pool_size);
+predictions = Composite(pool_size);
+predict_length = Composite(pool_size);
+train_steps = Composite(pool_size);
 
 for i = 1:pool_size
+    num_res{i} = num_res_in;
     avg_degree{i} = avg_degreein;
     sigma_res{i} = sigma_resin;
     radius{i} = radiusin;
@@ -102,10 +272,13 @@ for i = 1:pool_size
     trainfilename{i} = trainfilename_in;
     testfilename{i}  = testfilename_in;
     startfilename{i} = startfilename_in;
+    predictions{i} = predictions_in;
+    predict_length{i} = predict_length_in;
+    train_steps{i} = train_steps_in;
 end
 
 spmd(pool_size)
-
+    %% Create handles for data files and load parameters from them
     m = matfile(trainfilename);
     tm = matfile(testfilename);
     startfile = load(startfilename);
@@ -121,33 +294,41 @@ spmd(pool_size)
 
     datavar = m.datavar;
 
-    num_workers = numlabs; %numlabs is a matlab func that returns the number of workers allocated. equal to request_pool_size
-
-    chunk_size = num_inputs/numlabs; %%%%%%%%%% MUST DIVIDE (each reservoir responsible for this chunk)
+    num_workers = numlabs; % Determines number of workers (pool_size)
+    
+    % Determine the the size of the data for each worker and each reservoir
+    core_chunk_size = num_inputs/num_workers; 
+    res_chunk_size = num_inputs/num_res; 
 
     l = labindex; % labindex is a matlab function that returns the worker index
+    
+    % Determine the beginning, end, and overlaps for each reservoir
+    res_per_core = num_res/num_workers;
+    chunk_begin = zeros(res_per_core,1);
+    chunk_end = zeros(res_per_core,1);
+    rear_overlap = zeros(res_per_core,locality);
+    forward_overlap = zeros(res_per_core,locality);
+    
+    for res = 1:num_res/num_workers
+        
+        chunk_begin(res) = res_chunk_size*(res-1)+core_chunk_size*(l-1)+1;
+        chunk_end(res) = core_chunk_size*(l-1)+res_chunk_size*res;
+        rear_overlap(res,:) = indexing_function_rear(chunk_begin(res), locality, num_inputs);  %spatial overlap on the one side
+        forward_overlap(res,:) = indexing_function_forward(chunk_end(res), locality, num_inputs);  %spatial overlap on the other side
+    end
 
-    chunk_begin = chunk_size*(l-1)+1;
-
-    chunk_end = chunk_size*l;
-
-    rear_overlap = indexing_function_rear(chunk_begin, locality, num_inputs);  %spatial overlap on the one side
-
-    forward_overlap = indexing_function_forward(chunk_end, locality, num_inputs);  %spatial overlap on the other side
-
-    overlap_size = length(rear_overlap) + length(forward_overlap);
-
-    approx_reservoir_size = reservoir_size;  % number of nodes in an individual reservoir network (approximate upto the next whole number divisible by number of inputs)
-
-    resparams.sparsity = avg_degree/approx_reservoir_size;
+    overlap_size = size(rear_overlap,2) + size(forward_overlap,2);
+    
+    % Set resparams struct parameters
+    resparams.sparsity = avg_degree/reservoir_size;
 
     resparams.degree = avg_degree;
 
-    resparams.N = approx_reservoir_size;
+    resparams.N = reservoir_size;
 
     resparams.discard_length = 1000;
 
-    resparams.predict_length = 2000;
+    resparams.predict_length = predict_length;
 
     resparams.sync_length = 100;
     
@@ -156,143 +337,165 @@ spmd(pool_size)
     else
         resparams.train_length = train_length;  
     end
+    
+    assert(mod(resparams.train_length/train_steps,1)==0,...
+        'train_steps must divide train_length. Change train_steps to a whole number that divides train_length.')
 
-    resparams.predictions = 10; % define number of predictions (a prediction and synchronization is of length predict_length + sync_length)
+    resparams.predictions = predictions; % define number of predictions (a prediction and synchronization is of length predict_length + sync_length)
 
     resparams.radius = radius;
 
     resparams.beta_model = beta_model; % ridge regression regularization parameter for the model 
 
     resparams.beta_reservoir = beta; % ridge regression regularization parameter for the reservoir states
-
-    u = zeros(chunk_size + overlap_size, resparams.discard_length); % this will be populated by the input data to the reservoir
+    
+    % Load transient data & noise
+    u = zeros(core_chunk_size + overlap_size, resparams.discard_length); % this will be populated by the input data to the reservoir
 
     if locality > 0
-        if rear_overlap(end)<rear_overlap(1)
-            u(1:locality,:) = [m.train_input_sequence(1:resparams.discard_length, rear_overlap(rear_overlap>rear_overlap(end))),...
-                m.train_input_sequence(1:resparams.discard_length, rear_overlap(rear_overlap<=rear_overlap(end)))]';
+        if rear_overlap(1,end)<rear_overlap(1,1)
+            u(1:locality,:) = [m.train_input_sequence(1:resparams.discard_length, rear_overlap(1,rear_overlap(1,:)>rear_overlap(1,end))),...
+                m.train_input_sequence(1:resparams.discard_length, rear_overlap(1,rear_overlap(1,:)<=rear_overlap(1,end)))]';
         else
-            u(1:locality,:) = m.train_input_sequence(1:resparams.discard_length,rear_overlap)';
+            u(1:locality,:) = m.train_input_sequence(1:resparams.discard_length,rear_overlap(1,:))';
         end
 
-        if forward_overlap(end) < forward_overlap(1)
-            u(locality+chunk_size+1:2*locality+chunk_size,:) = [m.train_input_sequence(1:resparams.discard_length,forward_overlap(forward_overlap>forward_overlap(end))),...
-                m.train_input_sequence(1:resparams.discard_length,forward_overlap(forward_overlap<=forward_overlap(end)))]';
+        if forward_overlap(end,end) < forward_overlap(end,1)
+            u(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = [m.train_input_sequence(1:resparams.discard_length,forward_overlap(end,forward_overlap(end,:)>forward_overlap(end,end))),...
+                m.train_input_sequence(1:resparams.discard_length,forward_overlap(end,forward_overlap(end,:)<=forward_overlap(end,end)))]';
         else
-            u(locality+chunk_size+1:2*locality+chunk_size,:) = m.train_input_sequence(1:resparams.discard_length,forward_overlap)';
+            u(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = m.train_input_sequence(1:resparams.discard_length,forward_overlap(end,:))';
         end
     end
 
-    u(locality+1:locality+chunk_size,:) = m.train_input_sequence(1:resparams.discard_length, chunk_begin:chunk_end)';
-
-    noise = zeros(chunk_size + overlap_size, resparams.discard_length); % this will be populated by the input data to the reservoir
+    u(locality+1:locality+core_chunk_size,:) = m.train_input_sequence(1:resparams.discard_length, chunk_begin(1):chunk_end(end))';
+    
+    noise = zeros(core_chunk_size + overlap_size, resparams.discard_length); % this will be populated by the input data to the reservoir
 
     if locality > 0
-        if rear_overlap(end)<rear_overlap(1)
-            noise(1:locality,:) = [m.noise(1:resparams.discard_length, rear_overlap(rear_overlap>rear_overlap(end))),...
-                m.noise(1:resparams.discard_length, rear_overlap(rear_overlap<=rear_overlap(end)))]';
+        if rear_overlap(1,end)<rear_overlap(1,1)
+            noise(1:locality,:) = [m.noise(1:resparams.discard_length, rear_overlap(1,rear_overlap(1,:)>rear_overlap(1,end))),...
+                m.noise(1:resparams.discard_length, rear_overlap(1,rear_overlap(1,:)<=rear_overlap(1,end)))]';
         else
-            noise(1:locality,:) = m.noise(1:resparams.discard_length,rear_overlap)';
+            noise(1:locality,:) = m.noise(1:resparams.discard_length,rear_overlap(1,:))';
         end
 
-        if forward_overlap(end) < forward_overlap(1)
-            noise(locality+chunk_size+1:2*locality+chunk_size,:) = [m.noise(1:resparams.discard_length,forward_overlap(forward_overlap>forward_overlap(end))),...
-                m.noise(1:resparams.discard_length,forward_overlap(forward_overlap<=forward_overlap(end)))]';
+        if forward_overlap(end,end) < forward_overlap(end,1)
+            noise(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = [m.noise(1:resparams.discard_length,forward_overlap(end,forward_overlap(end,:)>forward_overlap(end,end))),...
+                m.noise(1:resparams.discard_length,forward_overlap(end,forward_overlap(end,:)<=forward_overlap(end,end)))]';
         else
-            noise(locality+chunk_size+1:2*locality+chunk_size,:) = m.noise(1:resparams.discard_length,forward_overlap)';
+            noise(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = m.noise(1:resparams.discard_length,forward_overlap(end,:))';
         end
     end
 
-    noise(locality+1:locality+chunk_size,:) = m.noise(1:resparams.discard_length, chunk_begin:chunk_end)';
-
-    testu = zeros(chunk_size + overlap_size, test_len); % this will be populated by the test data used for synchronization
+    noise(locality+1:locality+core_chunk_size,:) = m.noise(1:resparams.discard_length, chunk_begin(1):chunk_end(end))';
+    
+    % Load test data for use during synchronization
+    testu = zeros(core_chunk_size + overlap_size, test_len); % this will be populated by the input data to the reservoir
 
     if locality > 0
-        if rear_overlap(end)<rear_overlap(1)
-            testu(1:locality,:) = [tm.test_input_sequence(:, rear_overlap(rear_overlap>rear_overlap(end))),...
-                tm.test_input_sequence(:, rear_overlap(rear_overlap<=rear_overlap(end)))]';
+        if rear_overlap(1,end)<rear_overlap(1,1)
+            testu(1:locality,:) = [tm.test_input_sequence(:, rear_overlap(1,rear_overlap(1,:)>rear_overlap(1,end))),...
+                tm.test_input_sequence(:, rear_overlap(1,rear_overlap(1,:)<=rear_overlap(1,end)))]';
         else
-            testu(1:locality,:) = tm.test_input_sequence(:,rear_overlap)';
+            testu(1:locality,:) = tm.test_input_sequence(:,rear_overlap(1,:))';
         end
 
-        if forward_overlap(end) < forward_overlap(1)
-            testu(locality+chunk_size+1:2*locality+chunk_size,:) = [tm.test_input_sequence(:,forward_overlap(forward_overlap>forward_overlap(end))),...
-                tm.test_input_sequence(:,forward_overlap(forward_overlap<=forward_overlap(end)))]';
+        if forward_overlap(end,end) < forward_overlap(end,1)
+            testu(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = [tm.test_input_sequence(:,forward_overlap(end,forward_overlap(end,:)>forward_overlap(end,end))),...
+                tm.test_input_sequence(:,forward_overlap(end,forward_overlap(end,:)<=forward_overlap(end,end)))]';
         else
-            testu(locality+chunk_size+1:2*locality+chunk_size,:) = tm.test_input_sequence(:,forward_overlap)';
+            testu(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = tm.test_input_sequence(:,forward_overlap(end,:))';
         end
     end
 
-    testu(locality+1:locality+chunk_size,:) = tm.test_input_sequence(:, chunk_begin:chunk_end)';
+    testu(locality+1:locality+core_chunk_size,:) = tm.test_input_sequence(:, chunk_begin(1):chunk_end(end))';
+    
+    %% Generate reservoirs
+    A = cell(res_per_core,1);
+    for res = 1:res_per_core
+        A{res} = generate_reservoir(resparams.N, resparams.radius, resparams.degree, res_per_core*(l-1)+res, runiter, num_workers);
+    end
 
-
-
-    A = generate_reservoir(resparams.N, resparams.radius, resparams.degree, labindex, runiter, num_workers);
-
-    input_size = (chunk_size + overlap_size);
+    %% Generate input matrices
+    input_size = (res_chunk_size + overlap_size);
 
     q = floor(resparams.N/(input_size));
     
-    win = zeros(resparams.N, input_size);
+    win = cell(res_per_core,1);
+    for res = 1:res_per_core
+        win{res} = zeros(resparams.N, input_size);
 
-    for i=1:input_size
-        rng(i)
-        ip = (-1 + 2*rand(q,1));
-        win((i-1)*q+1:i*q,i) = resparams.sigma_data*ip;
-    end
+        for i=1:input_size
+            rng(i)
+            ip = (-1 + 2*rand(q,1));
+            win{res}((i-1)*q+1:i*q,i) = resparams.sigma_data*ip;
+        end
 
-    occupied_nodes = floor(resparams.N/(input_size))*input_size;
-    leftover_nodes = resparams.N - occupied_nodes;
+        occupied_nodes = floor(resparams.N/(input_size))*input_size;
+        leftover_nodes = resparams.N - occupied_nodes;
 
-    for i=1:leftover_nodes
-        rng(i+input_size)
-        ip = (-1 + 2*rand);
-        win(occupied_nodes+i,randi([1,input_size])) = resparams.sigma_data*ip;
+        for i=1:leftover_nodes
+            rng(i+input_size)
+            ip = (-1 + 2*rand);
+            win{res}(occupied_nodes+i,randi([1,input_size])) = resparams.sigma_data*ip;
+        end
     end
     
-    % Define number of steps over which to train and the length of each
-    % training section
-
-    train_steps = 50;
-    assert(mod(resparams.train_length/train_steps,1)==0,...
-        'train_steps must divide train_length. Change train_steps to a whole number that divides train_length.')
+    % Set the length of each training period
+    
     train_size  = resparams.train_length/train_steps;
 
-    states = zeros(resparams.N, train_size);
-
-    x = zeros(resparams.N,1);
+    states = cell(res_per_core,1);
+    x = cell(res_per_core,1);
+    for res = 1:res_per_core
+        states{res} = zeros(resparams.N, train_size);
+        x{res} = zeros(resparams.N,1);
+    end
 
 end
 
+% Create variables to store outer product matrices
 rp = resparams{1};
 
 train_file = m{1};
 
 data_trstates = Composite(num_workers{1});
 states_trstates = Composite(num_workers{1});
-if strcmp(typeflag{1}, 'hybrid')
-    for i=1:num_workers{1}
-        data_trstates{i} = zeros(chunk_size{1},rp.N+chunk_size{1});
-        states_trstates{i} = zeros(rp.N+chunk_size{1});
-    end
-elseif strcmp(typeflag{1},'reservoir')
-    for i=1:num_workers{1}
-        data_trstates{i} = zeros(chunk_size{1},rp.N);
-        states_trstates{i} = zeros(rp.N);
-    end
+for i=1:num_workers{1}
+    data_trstates{i} = cell(res_per_core{1},1);
+    states_trstates{i} = cell(res_per_core{1},1);
 end
 
+
 spmd(pool_size)
-    for i = 1:resparams.discard_length-1
-        x = tanh(A*x + win*(u(:,i)+resnoise*noise(:,i)));
+    if strcmp(typeflag, 'hybrid')
+        for i=1:res_per_core
+            data_trstates{i} = zeros(res_chunk_size,resparams.N+res_chunk_size);
+            states_trstates{i} = zeros(resparams.N+res_chunk_size);
+        end
+    elseif strcmp(typeflag,'reservoir')
+        for i=1:res_per_core
+            data_trstates{i} = zeros(res_chunk_size,resparams.N);
+            states_trstates{i} = zeros(resparams.N);
+        end
     end
-    states(:,1) = x;
+    %% Feed in initial training data transient but do not train on resulting states
+    res_chunk = cell(res_per_core,1);
+    for res = 1:res_per_core
+        res_chunk{res} = res_chunk_size*(res-1)+1:res_chunk_size*res+2*locality;
+        for i = 1:resparams.discard_length-1
+            x{res} = tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
+        end
+        states{res}(:,1) = x{res};
+    end
 end
 
 for k = 1:train_steps{1}
 
-    % Perform training over a number of train_steps, only importing
-    % training data for each section each time
+    %% Perform training over a number of train_steps, only importing training data for each section each time
+    % For hybrid, first use knowledge-based predictor to get single step
+    % predictions and send local regions to each worker.
     if strcmp(typeflag{1},'hybrid')
         if k == train_steps{1}
             train_input = datavar{1}.*(train_file.train_input_sequence(rp.discard_length+(k-1)*train_size{1}:rp.discard_length+k*train_size{1},:)'+...
@@ -308,17 +511,21 @@ for k = 1:train_steps{1}
 
             for j = 1:num_workers{1}
 
-                v = zeros(input_size{1}, train_size{1}+1);
+                v = zeros(core_chunk_size{1}+overlap_size{1}, train_size{1}+1);
+                rear_overlap_temp = rear_overlap{j};
+                forward_overlap_temp = forward_overlap{j};
+                chunk_begin_temp = chunk_begin{j};
+                chunk_end_temp = chunk_end{j};
 
                 if locality{1} > 0
 
-                    v(1:locality{1},:) = model_forecast(rear_overlap{j}, 1:end);
+                    v(1:locality{1},:) = model_forecast(rear_overlap_temp(1,:), 1:end);
 
-                    v(locality{1}+chunk_size{1}+1:2*locality{1}+chunk_size{1},:) = model_forecast(forward_overlap{j}, 1:end);
+                    v(locality{1}+core_chunk_size{1}+1:2*locality{1}+core_chunk_size{1},:) = model_forecast(forward_overlap_temp(end,:), 1:end);
 
                 end
 
-                v(locality{1}+1:locality{1}+chunk_size{1},:) = model_forecast(chunk_begin{j}:chunk_end{j}, 1:end);
+                v(locality{1}+1:locality{1}+core_chunk_size{1},:) = model_forecast(chunk_begin_temp(1):chunk_end_temp(end), 1:end);
 
                 model_states{j} = v;
 
@@ -337,17 +544,21 @@ for k = 1:train_steps{1}
 
             for j = 1:num_workers{1}
 
-                v = zeros(input_size{1}, train_size{1});
+                v = zeros(core_chunk_size{1}+overlap_size{1}, train_size{1});
+                rear_overlap_temp = rear_overlap{j};
+                forward_overlap_temp = forward_overlap{j};
+                chunk_begin_temp = chunk_begin{j};
+                chunk_end_temp = chunk_end{j};
 
                 if locality{1} > 0
 
-                    v(1:locality{1},:) = model_forecast(rear_overlap{j}, 1:end);
+                    v(1:locality{1},:) = model_forecast(rear_overlap_temp(1,:), 1:end);
 
-                    v(locality{1}+chunk_size{1}+1:2*locality{1}+chunk_size{1},:) = model_forecast(forward_overlap{j}, 1:end);
+                    v(locality{1}+core_chunk_size{1}+1:2*locality{1}+core_chunk_size{1},:) = model_forecast(forward_overlap_temp(end,:), 1:end);
 
                 end
 
-                v(locality{1}+1:locality{1}+chunk_size{1},:) = model_forecast(chunk_begin{j}:chunk_end{j}, 1:end);
+                v(locality{1}+1:locality{1}+core_chunk_size{1},:) = model_forecast(chunk_begin_temp(1):chunk_end_temp(end), 1:end);
 
                 model_states{j} = v;
 
@@ -360,98 +571,130 @@ for k = 1:train_steps{1}
         kc{i} = k;
     end
     k = kc;
-
+    % Load training data
     spmd(pool_size)
-        u = zeros(chunk_size + overlap_size, train_size); % this will be populated by the input data to the reservoir
+        u = zeros(core_chunk_size + overlap_size, train_size); % this will be populated by the input data to the reservoir
+
         if locality > 0
-            if rear_overlap(end)<rear_overlap(1)
-                u(1:locality,:) = [m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+k*train_size,...
-                    rear_overlap(rear_overlap>rear_overlap(end))),...
-                    m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+k*train_size,...
-                    rear_overlap(rear_overlap<=rear_overlap(end)))]';
+            if rear_overlap(1,end)<rear_overlap(1,1)
+                u(1:locality,:) = [m.train_input_sequence(resparams.discard_length+...
+                    (k-1)*train_size+1:resparams.discard_length+k*train_size, ...
+                    rear_overlap(1,rear_overlap(1,:)>rear_overlap(1,end))),...
+                    m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size, ...
+                    rear_overlap(1,rear_overlap(1,:)<=rear_overlap(1,end)))]';
             else
                 u(1:locality,:) = m.train_input_sequence(resparams.discard_length+...
-                    (k-1)*train_size+1:resparams.discard_length+k*train_size,rear_overlap)';
+                    (k-1)*train_size+1:resparams.discard_length+k*train_size,rear_overlap(1,:))';
             end
 
-            if forward_overlap(end) < forward_overlap(1)
-                u(locality+chunk_size+1:2*locality+chunk_size,:) = [m.train_input_sequence(resparams.discard_length+...
-                    (k-1)*train_size+1:resparams.discard_length+k*train_size,forward_overlap(forward_overlap>forward_overlap(end))),...
-                    m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+...
-                    k*train_size,forward_overlap(forward_overlap<=forward_overlap(end)))]';
+            if forward_overlap(end,end) < forward_overlap(end,1)
+                u(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = ...
+                    [m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size,...
+                    forward_overlap(end,forward_overlap(end,:)>forward_overlap(end,end))),...
+                    m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size,...
+                    forward_overlap(end,forward_overlap(end,:)<=forward_overlap(end,end)))]';
             else
-                u(locality+chunk_size+1:2*locality+chunk_size,:) = m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+k*train_size,forward_overlap)';
+                u(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = ...
+                    m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size,forward_overlap(end,:))';
             end
         end
-        u(locality+1:locality+chunk_size,:) = m.train_input_sequence(resparams.discard_length+...
-            (k-1)*train_size+1:resparams.discard_length+k*train_size, chunk_begin:chunk_end)';
 
-        noise = zeros(chunk_size + overlap_size, train_size); % this will be populated by the input data to the reservoir
+        u(locality+1:locality+core_chunk_size,:) = ...
+            m.train_input_sequence(resparams.discard_length+(k-1)*train_size+1:...
+            resparams.discard_length+k*train_size, chunk_begin(1):chunk_end(end))';
+
+        noise = zeros(core_chunk_size + overlap_size, train_size); % this will be populated by the training noise
+
         if locality > 0
-            if rear_overlap(end)<rear_overlap(1)
-                noise(1:locality,:) = [m.noise(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+k*train_size,...
-                    rear_overlap(rear_overlap>rear_overlap(end))),...
-                    m.noise(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+k*train_size,...
-                    rear_overlap(rear_overlap<=rear_overlap(end)))]';
+            if rear_overlap(1,end)<rear_overlap(1,1)
+                noise(1:locality,:) = [m.noise(resparams.discard_length+...
+                    (k-1)*train_size+1:resparams.discard_length+k*train_size, ...
+                    rear_overlap(1,rear_overlap(1,:)>rear_overlap(1,end))),...
+                    m.noise(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size, ...
+                    rear_overlap(1,rear_overlap(1,:)<=rear_overlap(1,end)))]';
             else
                 noise(1:locality,:) = m.noise(resparams.discard_length+...
-                    (k-1)*train_size+1:resparams.discard_length+k*train_size,rear_overlap)';
+                    (k-1)*train_size+1:resparams.discard_length+k*train_size,...
+                    rear_overlap(1,:))';
             end
 
-            if forward_overlap(end) < forward_overlap(1)
-                noise(locality+chunk_size+1:2*locality+chunk_size,:) = [m.noise(resparams.discard_length+...
-                    (k-1)*train_size+1:resparams.discard_length+k*train_size,forward_overlap(forward_overlap>forward_overlap(end))),...
-                    m.noise(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+...
-                    k*train_size,forward_overlap(forward_overlap<=forward_overlap(end)))]';
+            if forward_overlap(end,end) < forward_overlap(end,1)
+                noise(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = ...
+                    [m.noise(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size,...
+                    forward_overlap(end,forward_overlap(end,:)>forward_overlap(end,end))),...
+                    m.noise(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size,...
+                    forward_overlap(end,forward_overlap(end,:)<=forward_overlap(end,end)))]';
             else
-                noise(locality+chunk_size+1:2*locality+chunk_size,:) = m.noise(resparams.discard_length+(k-1)*train_size+1:resparams.discard_length+k*train_size,forward_overlap)';
+                noise(locality+core_chunk_size+1:2*locality+core_chunk_size,:) = ...
+                    m.noise(resparams.discard_length+(k-1)*train_size+1:...
+                    resparams.discard_length+k*train_size,forward_overlap(end,:))';
             end
         end
-        noise(locality+1:locality+chunk_size,:) = m.noise(resparams.discard_length+...
-            (k-1)*train_size+1:resparams.discard_length+k*train_size, chunk_begin:chunk_end)';
+
+        noise(locality+1:locality+core_chunk_size,:) = ...
+            m.noise(resparams.discard_length+(k-1)*train_size+1:...
+            resparams.discard_length+k*train_size, chunk_begin(1):chunk_end(end))';
+        
+        % For each reservoir, input the corresponding local region state
+        % and record the resulting reservoir state after evolution
+        augmented_states = cell(res_per_core,1);
+
+        for res = 1:res_per_core
+            for i = 1:train_size-1
+                states{res}(:,i+1) = tanh(A{res}*states{res}(:,i) + win{res}*(u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
+            end
+
+            x{res} = states{res}(:, end);
+
+            states{res}(2:2:resparams.N,:) = states{res}(2:2:resparams.N,:).^2;        
+            % For hybrid, form augmented state using knowldedge-based
+            % prediction
+            if strcmp(typeflag,'hybrid')
+                if k == train_steps
+                    augmented_states{res} = vertcat((model_states(locality+res_chunk_size*(res-1)+1:...
+                        locality+res_chunk_size*res,1:end-1)-datamean)./datavar, states{res});
+                    local_model = model_states(:,end);
+                else
+                    augmented_states{res} = vertcat((model_states(locality+res_chunk_size*(res-1)+1:...
+                        locality+res_chunk_size*res,:)-datamean)./datavar, states{res});
+                end
+            elseif strcmp(typeflag, 'reservoir')
+                augmented_states{res} = states{res};
+            end
+            % Use resulting states and training to form outer product
+            % matrices.
+            data_trstates{res} = data_trstates{res} + u(locality+res_chunk_size*(res-1)+1:...
+                        locality+res_chunk_size*res, :)*augmented_states{res}';
+            states_trstates{res} = states_trstates{res} + augmented_states{res}*augmented_states{res}';
 
 
-        for i = 1:train_size-1
-            states(:,i+1) = tanh(A*states(:,i) + win*(u(:,i)+resnoise*noise(:,i)));
-        end
-
-        x = states(:, end);
-
-        states(2:2:resparams.N,:) = states(2:2:resparams.N,:).^2;        
-
-        if strcmp(typeflag,'hybrid')
             if k == train_steps
-                augmented_states = vertcat((model_states(locality+1:locality+chunk_size,1:end-1)-datamean)./datavar, states);
-                local_model = model_states(:,end);
+                states{res}(:,1) = tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},end)+resnoise*noise(res_chunk{res},end)));
             else
-                augmented_states = vertcat((model_states(locality+1:locality+chunk_size,:)-datamean)./datavar, states);
+                states{res}(:,1) = tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},end)+resnoise*noise(res_chunk{res},end)));
             end
-        elseif strcmp(typeflag, 'reservoir')
-            augmented_states = states;
         end
-
-        data_trstates = data_trstates + u(locality+1:locality+chunk_size, :)*augmented_states';
-        states_trstates = states_trstates + augmented_states*augmented_states';
-
-
-        if k == train_steps
-            states(:,1) = tanh(A*x + win*(u(:,end)+resnoise*noise(:,end)));
-        else
-            states(:,1) = tanh(A*x + win*(u(:,end)+resnoise*noise(:,end)));
-        end
-
     end
 end
 spmd(pool_size)
-%%
+%% Train each reservoir using Ridge Regression
     if strcmp(typeflag, 'hybrid')
-        idenmat = sparse(diag([resparams.beta_model*ones(1,chunk_size),resparams.beta_reservoir*ones(1,resparams.N)]));
+        idenmat = sparse(diag([resparams.beta_model*ones(1,res_chunk_size),resparams.beta_reservoir*ones(1,resparams.N)]));
     elseif strcmp(typeflag, 'reservoir')
         idenmat = sparse(diag(resparams.beta_reservoir*ones(1,resparams.N)));
     end
-    % Train output matrix
-    wout = data_trstates/(states_trstates+idenmat);
-
+    wout = cell(res_per_core,1);
+    for res = 1:res_per_core
+        wout{res} = data_trstates{res}/(states_trstates{res}+idenmat);
+    end
+%% Use full system to make predictions
     if labindex == 1
         prediction = cell(resparams.predictions,1);
         for j = 1:resparams.predictions
@@ -460,10 +703,14 @@ spmd(pool_size)
     end
 
     for j = 1:resparams.predictions
-        x = zeros(size(x));
+        for res = 1:res_per_core
+            x{res} = zeros(size(x{res}));
+        end
         if labindex == 1
             test_input = datavar.*tm.test_input_sequence(start_iter(j):start_iter(j)+resparams.sync_length-1,:)'+datamean;
         end
+        %% First, we synchronize the reservoir system to the test data using
+        % a short synchronization sequence
         for i=1:resparams.sync_length
             feedback = testu(:,start_iter(j)+(i-1));
 
@@ -474,49 +721,59 @@ spmd(pool_size)
                 else
                     global_model_forecast = labBroadcast(1);
                 end
-
+                % LabBarrier tells MATLAB to wait until all workers reach
+                % this point
                 labBarrier;
 
                 local_model = zeros(input_size,1);
 
                 if locality > 0
 
-                    local_model(1:locality) = global_model_forecast(rear_overlap,1);
+                    local_model(1:locality) = global_model_forecast(rear_overlap(1,:),1);
 
-                    local_model(locality+chunk_size+1:2*locality+chunk_size) = global_model_forecast(forward_overlap,1);
+                    local_model(locality+core_chunk_size+1:2*locality+core_chunk_size) =...
+                        global_model_forecast(forward_overlap(end,:),1);
                 end
 
-                local_model(locality+1:locality+chunk_size) = global_model_forecast(chunk_begin:chunk_end,1);
+                local_model(locality+1:locality+core_chunk_size) = global_model_forecast(chunk_begin(1):chunk_end(end),1);
             end
-
-            x = tanh(A*x + win*feedback);
+            for res = 1:res_per_core
+                x{res} = tanh(A{res}*x{res} + win{res}*feedback(res_chunk{res}));
+            end
         end
+        % Obtain initial condition for prediction
+        x_ = cell(res_per_core,1);
+        augmented_x = cell(res_per_core,1);
+        out = zeros(core_chunk_size,1);
+        for res = 1:res_per_core
+            x_{res} = x{res};
+            x_{res}(2:2:resparams.N) = x_{res}(2:2:resparams.N).^2;
 
-        x_ = x;
-        x_(2:2:resparams.N) = x_(2:2:resparams.N).^2;
-
-        if strcmp(typeflag, 'hybrid')
-            augmented_x = vertcat((local_model(locality+1:locality+chunk_size) - datamean)./datavar, x_);
-        elseif strcmp(typeflag, 'reservoir')
-            augmented_x = x_;
+            if strcmp(typeflag, 'hybrid')
+                augmented_x{res} = vertcat((local_model(locality+res_chunk_size*(res-1)+1:...
+                    locality+res_chunk_size*res) - datamean)./datavar, x_{res});
+            elseif strcmp(typeflag, 'reservoir')
+                augmented_x{res} = x_{res};
+            end
+            out(res_chunk_size*(res-1)+1:res_chunk_size*res) = wout{res}*augmented_x{res};
         end
-%        out = local_model(locality+1:locality+chunk_size,:);
-        out = wout*augmented_x;
         labBarrier;
         concatenated_out = gcat(out, 1);
-
+        
+        %% Predict out to a time PredictLength*(\Delta t)
         for pred_idx = 1:resparams.predict_length
-
+            % Get local region from global prediction
             feedback = zeros(input_size,1);
 
             if locality > 0
-                feedback(1:locality) = concatenated_out(rear_overlap);
+                feedback(1:locality) = concatenated_out(rear_overlap(1,:));
 
-                feedback(locality+chunk_size+1:2*locality+chunk_size) = concatenated_out(forward_overlap);
+                feedback(locality+core_chunk_size+1:2*locality+core_chunk_size) = concatenated_out(forward_overlap(end,:));
             end
 
-            feedback(locality+1:locality+chunk_size) = concatenated_out(chunk_begin:chunk_end);
-
+            feedback(locality+1:locality+core_chunk_size) = concatenated_out(chunk_begin(1):chunk_end(end));
+            
+            % If CHyPP, then obtain the local knowledge-based prediction
             if strcmp(typeflag, 'hybrid')
                 if labindex == 1
                     forecast_out = ModelParams.predict( datavar.*concatenated_out + datamean, ModelParams);
@@ -530,28 +787,36 @@ spmd(pool_size)
                 local_model = zeros(input_size,1);
 
                 if locality > 0
-                    local_model(1:locality) = global_model_forecast(rear_overlap,1);
+                    local_model(1:locality) = global_model_forecast(rear_overlap(1,:),1);
 
-                    local_model(locality+chunk_size+1:2*locality+chunk_size) = global_model_forecast(forward_overlap,1);
+                    local_model(locality+core_chunk_size+1:2*locality+core_chunk_size) = global_model_forecast(forward_overlap(end,:),1);
                 end
 
-                local_model(locality+1:locality+chunk_size) = global_model_forecast(chunk_begin:chunk_end,1);
+                local_model(locality+1:locality+core_chunk_size) = global_model_forecast(chunk_begin(1):chunk_end(end),1);
             end
+            
+            % Obtain prediction from each reservoir and concatenate all of
+            % regions for each worker together.
+            for res = 1:res_per_core
+                x{res} = tanh(A{res}*x{res} + win{res}*feedback(res_chunk{res}));
+                x_{res} = x{res};
+                x_{res}(2:2:resparams.N) = x_{res}(2:2:resparams.N).^2;
 
-            x = tanh(A*x + win*feedback);
-            x_ = x;
-            x_(2:2:resparams.N) = x_(2:2:resparams.N).^2;
-
-            if strcmp(typeflag, 'hybrid')
-                augmented_x = vertcat((local_model(locality+1:locality+chunk_size) - datamean)./datavar, x_);
-            elseif strcmp(typeflag, 'reservoir')
-                augmented_x = x_;
+                if strcmp(typeflag, 'hybrid')
+                    augmented_x{res} = vertcat((local_model(locality+res_chunk_size*(res-1)+1:...
+                        locality+res_chunk_size*res) - datamean)./datavar, x_{res});
+                elseif strcmp(typeflag, 'reservoir')
+                    augmented_x{res} = x_{res};
+                end
+        %        out = local_model(locality+1:locality+res_chunk_size,:);
+                out(res_chunk_size*(res-1)+1:res_chunk_size*res) = wout{res}*augmented_x{res};
             end
-    %        out = local_model(locality+1:locality+chunk_size,:);
-            out = wout*augmented_x;
             labBarrier;
+            
+            % Send full state to all workers
             concatenated_out = gcat(out, 1);  
-
+            
+            % Record prediction
             if labindex == 1
                 prediction{j}(:,pred_idx) = concatenated_out;
             end
@@ -560,26 +825,39 @@ spmd(pool_size)
     end
 end
 
-approx_reservoir_size = approx_reservoir_size{1};
+%% Get CHyPP parameters from each worker
+reservoir_size = reservoir_size{1};
 
 savepred = prediction{1};
 resparams = resparams{1};
 Woutmat = {};
+Amat = {};
+winmat = {};
+iter = 1;
 for i=1:pool_size
-    Woutmat{i} = wout{i};
+    wout_temp = wout{i};
+    A_temp = A{i};
+    win_temp = win{i};
+    for res = 1:res_per_core{1}
+        Woutmat{iter} = wout_temp{res};
+        Amat{iter} = A_temp{res};
+        winmat{iter} = win_temp{res};
+        iter = iter + 1;
+    end
 end
 
+% Set output file names
 beta_reservoir = rp.beta_reservoir;
 start_iter = start_iter{1};
 if strcmp(typeflag_in, 'hybrid')
-    filename = [outputlocation,'/','hybrid', '-pool', num2str(pool_size), ...
-        'res', num2str(approx_reservoir_size), ...
+    filename = [outputlocation,'/','hybrid', '-numres', num2str(num_res_in), ...
+        'res', num2str(reservoir_size), ...
         'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
         strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
         'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_data.mat'];
 elseif strcmp(typeflag_in, 'reservoir')
-    filename = [outputlocation,'/','reservoir', '-pool', num2str(pool_size), ...
-        'res', num2str(approx_reservoir_size), ...
+    filename = [outputlocation,'/','reservoir', '-numres', num2str(num_res_in), ...
+        'res', num2str(reservoir_size), ...
         'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
         strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
         'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_data.mat'];
@@ -587,14 +865,18 @@ end
 
 tm = matfile(testfilename_in);
 
+%% Output predictions and CHyPP parameters
 if ifsavepred
     if isstruct(ModelParams)
-        save(filename, 'savepred','resparams','start_iter', 'Woutmat','ModelParams');
+        save(filename, 'savepred','resparams','start_iter', 'Woutmat','Amat','winmat','ModelParams');
     else
-        save(filename, 'savepred','resparams','start_iter', 'Woutmat');
+        save(filename, 'savepred','resparams','start_iter', 'Woutmat','Amat','winmat');
     end
 end
 
+%% Evaluate CHyPP (or parallel reservoir only) and knowledge-based model (if applicable)
+% For each prediction, calculate RMS error and valid time using the
+% specified error cutoff (saturation at sqrt(2))
 if isstruct(ModelParams) && ~isstruct(TestModelParams)
     TestModelParams = ModelParams;
 end
@@ -658,16 +940,16 @@ if isstruct(TestModelParams)
     model_avg_pred_length = mean(model_pred_length);
     model_std_pred_length = std(model_pred_length);
 end
-
+%% Set rms data output file name and safe it specified
 if strcmp(typeflag_in, 'hybrid')
-    filename_rms = [outputlocation,'/','hybrid', '-pool', num2str(pool_size), ...
-            'res', num2str(approx_reservoir_size), ...
+    filename_rms = [outputlocation,'/','hybrid', '-numres', num2str(num_res_in), ...
+            'res', num2str(reservoir_size), ...
             'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
             strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
             'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_rms.mat'];
 elseif strcmp(typeflag_in, 'reservoir')
-    filename_rms = [outputlocation,'/','reservoir', '-pool', num2str(pool_size), ...
-            'res', num2str(approx_reservoir_size), ...
+    filename_rms = [outputlocation,'/','reservoir', '-numres', num2str(num_res_in), ...
+            'res', num2str(reservoir_size), ...
             'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
             strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
             'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_rms.mat'];

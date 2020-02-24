@@ -1,4 +1,4 @@
-function generate_KS_data(ModelParams,discard_length)
+function generate_KS_data(ModelParams,predict_length)
 
 % ModelParams.d = 100;
 % ModelParams.tau = 0.25;
@@ -67,7 +67,7 @@ test_input_sequence= test_input_sequence./datavar;
 iterseed = 10;
 rng(iterseed);
 
-start_iter = randi([1,size(test_input_sequence,1)-discard_length - 1],1,1000);
+start_iter = randi([1,size(test_input_sequence,1)-predict_length - 1],1,1000);
 
 noise_seed = 20;
 rng(noise_seed);

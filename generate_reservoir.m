@@ -8,6 +8,6 @@ sparsity = degree/size;
 
 A = sprand(size, size, sparsity);
 
-e = max(abs(eigs(A)));
+e = abs(eigs(A,1));
 
 A = (A./e).*radius;
