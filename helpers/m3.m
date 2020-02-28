@@ -1,11 +1,11 @@
-function dZ = m3(Z, ModelParams, s_mat_k, Z2Xmat)
+function dZ = m3(Z, ModelParams)
 
 
-X = Z2Xmat*Z;
+X = ModelParams.Z2Xmat*Z;
 
 Y = Z-X;
 
-XX = XYquadratic(X,X, ModelParams.K, s_mat_k);
+XX = XYquadratic(X,X, ModelParams.K, ModelParams.s_mat_k);
 
 YY = -bsxfun(@times,circshift(Y,-2),circshift(Y, -1)) + bsxfun(@times,circshift(Y,-1),circshift(Y, 1));
 

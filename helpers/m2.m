@@ -1,8 +1,6 @@
-function dZ = m2(Z, ModelParams, s_mat_k, Z2Xmat)
+function dZ = m2(Z, ModelParams)
 
 
-X = Z;
+XX = XYquadratic(Z,Z, ModelParams.K, ModelParams.s_mat_k);
 
-XX = XYquadratic(X,X, ModelParams.K, s_mat_k);
-
-dZ = XX - X + ModelParams.F;
+dZ = XX - Z + ModelParams.F;

@@ -1,7 +1,7 @@
-function A = generate_reservoir(size, radius, degree, labindex, runiter, pool_size)
+function A = generate_reservoir(size, radius, degree, labindex, runiter, num_res, pool_size, res)
 
 % rng(runiter*pool_size+labindex)
-rng(runiter*pool_size+labindex)
+rng(runiter*num_res+(labindex-1)*pool_size+res,'twister')
 
 
 sparsity = degree/size;
