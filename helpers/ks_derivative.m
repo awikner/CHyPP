@@ -1,9 +1,16 @@
 function du = ks_derivative(u, ModelParams)
-
+% ks_derivative - approximates the right side of the Kuramoto-Sivashinsky
+% equation using the finite difference method.
+%
+% Inputs:
+%   u - spatial values of the system state at grid points
+%
+%   ModelParams - struct which specified model parameters
+% Outputs: du - right side of the KS equation
 
 dx = ModelParams.deltax;
 
-
+% Evaluate using FD with some order
 if ModelParams.order == 4
  
     ux = ((1/12)*circshift(u, -2) - (2/3)*circshift(u, -1) ...

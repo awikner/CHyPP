@@ -1,5 +1,9 @@
 function Z2Xmat = Z2X(ModelParams)
-
+% Z2X - computes the matrix used for smoothing the atmospheric variable Z
+% in Lorenz Model 3 to obtain X.
+%
+% Input: ModelParams - struct specifying model parameters
+% Output: Z2Xmat - matrix for smoothing Z
 Z2Xmat = zeros(ModelParams.N, ModelParams.N);
 
 

@@ -1,6 +1,11 @@
 function ModelParams = precompute_KS(ModelParams)
-%UNTITLED Summary of this function goes here
-%   Detailed explanation goes here
+% precompute_KS - computes the ETD parameters used for integrating the
+% Kuramoto-Sivashinsky equation with this method
+%
+% Input: ModelParams - struct containing KS model parameters
+%
+% Output: ModelParams - updated struct containing precomputed parameters
+
 if strcmp(ModelParams.modeltype, 'ETDRK')
     % Precompute various ETDRK4 scalar quantities:
     k = [0:ModelParams.N/2-1 0 -ModelParams.N/2+1:-1]'*(2*pi/ModelParams.d); % wave numbers

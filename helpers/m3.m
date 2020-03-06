@@ -1,5 +1,10 @@
 function dZ = m3(Z, ModelParams)
-
+%m3 - differential equation for the Lorenz model 3
+% Inputs:
+%   Z - values of Z at each grid point
+%
+%   ModelParams - struct containing model parameters
+%Output: dZ - time derivative at each grid point
 
 X = ModelParams.Z2Xmat*Z;
 
