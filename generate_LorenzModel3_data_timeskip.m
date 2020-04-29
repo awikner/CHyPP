@@ -1,4 +1,4 @@
-function generate_LorenzModel3_data(ModelParams,Nskip,predict_length)
+function generate_LorenzModel3_data_timeskip(ModelParams,Nskip,predict_length)
 % generate_LorenzModel3_data - generates training and testing time series
 % data from Lorenz Model 3.
 % Inputs:
@@ -72,6 +72,6 @@ start_iter = randi([1,size(test_input_sequence,1)-predict_length - sync_length -
 % Save the data
 mkdir('LorenzModel3_Data')
 addpath LorenzModel3_Data
-save(['LorenzModel3_Data/M3_train_input_sequence_Nskip',num2str(Nskip),'.mat'], 'train_input_sequence', 'noise','datamean', 'datavar', '-v7.3')
-save(['LorenzModel3_Data/M3_test_input_sequence_Nskip',num2str(Nskip),'.mat'], 'test_input_sequence', 'datamean', 'datavar', '-v7.3')
-save(['LorenzModel3_Data/M3_pred_start_indices_Nskip',num2str(Nskip),'.mat'],'start_iter','-v7.3')
+save(['LorenzModel3_Data/M3_train_input_sequence_Nskip',num2str(Nskip),'_numsteps',num2str(ModelParams.num_steps),'.mat'], 'train_input_sequence', 'noise','datamean', 'datavar', '-v7.3')
+save(['LorenzModel3_Data/M3_test_input_sequence_Nskip',num2str(Nskip),'_numsteps',num2str(ModelParams.num_steps),'.mat'], 'test_input_sequence', 'datamean', 'datavar', '-v7.3')
+save(['LorenzModel3_Data/M3_pred_start_indices_Nskip',num2str(Nskip),'_numsteps',num2str(ModelParams.num_steps),'.mat'],'start_iter','-v7.3')

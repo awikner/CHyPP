@@ -1,4 +1,4 @@
-function [savepred,filename,filename_rms] = CHyPP(varargin)
+function [avg_pred_length,filename,filename_rms] = CHyPP_DA(varargin)
 % CHyPP (Combined Hybrid Parallel Prediction) - executes the CHyPP
 % algorithm (training and prediction) for a 1-Dimensional system using
 % MATLAB's parallel computing toolbox. If you don't have access to this
@@ -187,6 +187,7 @@ predictions_in = 10;
 predict_length_in = 1000;
 train_steps_in = 50;
 error_cutoff = 0.2;
+covariance_inflation = 1;
 
 
 %% Parse inputs, assign to parameters, and check parameter compatibility
@@ -247,6 +248,8 @@ for arg = 1:numel(varargin)/2
             outputlocation = varargin{2*arg};
         case 'ErrorCutoff'
             error_cutoff = varargin{2*arg};
+        case 'CovarianceInflation'
+            covariance_inflation = varargin{2*arg};
         otherwise
             error(['Input variable ',num2str(arg),' not recognized.'])
     end
@@ -313,8 +316,9 @@ spmd(pool_size)
     [test_len,~] = size(tm,'test_input_sequence');
 
     datamean = m.datamean;
-
+    da_datamean = m.da_datamean;
     datavar = m.datavar;
+    da_datavar = m.da_datavar;
 
     num_workers = numlabs; % Determines number of workers (pool_size)
     
@@ -375,6 +379,9 @@ spmd(pool_size)
     u = GetDataChunk(1:resparams.discard_length,m,...
         'train_input_sequence',core_chunk_size,locality, ...
         chunk_begin(1),chunk_end(end),rear_overlap(1,:), forward_overlap(end,:));
+    dau = GetDataChunk(1:resparams.discard_length,m,'da_train_input_sequence',...
+        core_chunk_size,locality,chunk_begin(1),chunk_end(end),...
+        rear_overlap(1,:), forward_overlap(end,:));
     noise = GetDataChunk(1:resparams.discard_length,m,...
         'noise',core_chunk_size,locality,chunk_begin(1),chunk_end(end),...
         rear_overlap(1,:), forward_overlap(end,:));
@@ -390,7 +397,7 @@ spmd(pool_size)
     end
 
     %% Generate input matrices
-    input_size = (res_chunk_size + overlap_size);
+    input_size = 2*(res_chunk_size + overlap_size);
 
     q = floor(resparams.N/(input_size));
     
@@ -443,12 +450,12 @@ end
 spmd(pool_size)
     if strcmp(typeflag, 'hybrid')
         for i=1:res_per_core
-            data_trstates{i} = zeros(res_chunk_size,resparams.N+res_chunk_size);
+            data_trstates{i} = zeros(2*res_chunk_size,resparams.N+res_chunk_size);
             states_trstates{i} = zeros(resparams.N+res_chunk_size);
         end
     elseif strcmp(typeflag,'reservoir')
         for i=1:res_per_core
-            data_trstates{i} = zeros(res_chunk_size,resparams.N);
+            data_trstates{i} = zeros(2*res_chunk_size,resparams.N);
             states_trstates{i} = zeros(resparams.N);
         end
     end
@@ -457,7 +464,8 @@ spmd(pool_size)
     for res = 1:res_per_core
         res_chunk{res} = res_chunk_size*(res-1)+1:res_chunk_size*res+2*locality;
         for i = 1:resparams.discard_length-1
-            x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
+            x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*...
+                ([u(res_chunk{res},i);dau(res_chunk{res},i)]+resnoise*[noise(res_chunk{res},i);noise(res_chunk{res},i)]));
         end
         states{res}(:,1) = x{res};
     end
@@ -475,7 +483,7 @@ for k = 1:train_steps{1}
             init_cond_indices = rp.discard_length+(k-1)*train_size{1}:rp.discard_length+k*train_size{1}-1;
         end
         model_states = GetLocalModelPredictions(init_cond_indices,...
-            train_file,'train_input_sequence','noise',datamean{1},datavar{1},...
+            train_file,'da_train_input_sequence','noise',da_datamean{1},da_datavar{1},...
             resnoise{1},ModelParams,pool_size,core_chunk_size{1},...
             locality{1},chunk_begin,chunk_end,rear_overlap,...
             forward_overlap);
@@ -495,6 +503,10 @@ for k = 1:train_steps{1}
             core_chunk_size,locality,chunk_begin(1),...
             chunk_end(end),rear_overlap(1,:),forward_overlap(end,:));
         
+        dau = GetDataChunk(input_data_indices,m,'da_train_input_sequence',...
+            core_chunk_size,locality,chunk_begin(1),...
+            chunk_end(end),rear_overlap(1,:),forward_overlap(end,:));
+        
         noise = GetDataChunk(input_data_indices,m,'noise',...
             core_chunk_size,locality,chunk_begin(1),...
             chunk_end(end),rear_overlap(1,:),forward_overlap(end,:));
@@ -502,12 +514,12 @@ for k = 1:train_steps{1}
         % For each reservoir, input the corresponding local region state
         % and record the resulting reservoir state after evolution
         augmented_states = cell(res_per_core,1);
-
         for res = 1:res_per_core
             for i = 1:train_size-1
                 states{res}(:,i+1) = (1-leakage)*states{res}(:,i)+...
                     leakage*tanh(A{res}*states{res}(:,i) + win{res}*...
-                    (u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
+                    ([u(res_chunk{res},i);dau(res_chunk{res},i)]+...
+                    resnoise*[noise(res_chunk{res},i);noise(res_chunk{res},i)]));
             end
 
             x{res} = states{res}(:, end);
@@ -518,22 +530,23 @@ for k = 1:train_steps{1}
             if strcmp(typeflag,'hybrid')
                 if k == train_steps
                     augmented_states{res} = vertcat((model_states(locality+res_chunk_size*(res-1)+1:...
-                        locality+res_chunk_size*res,1:end-1)-datamean)./datavar, states{res});
+                        locality+res_chunk_size*res,1:end-1)-da_datamean)./da_datavar, states{res});
                     local_model = model_states(:,end);
                 else
                     augmented_states{res} = vertcat((model_states(locality+res_chunk_size*(res-1)+1:...
-                        locality+res_chunk_size*res,:)-datamean)./datavar, states{res});
+                        locality+res_chunk_size*res,:)-da_datamean)./da_datavar, states{res});
                 end
             elseif strcmp(typeflag, 'reservoir')
                 augmented_states{res} = states{res};
             end
             % Use resulting states and training to form outer product
             % matrices.
-            data_trstates{res} = data_trstates{res} + u(locality+res_chunk_size*(res-1)+1:...
-                        locality+res_chunk_size*res, :)*augmented_states{res}';
+            data_trstates{res} = data_trstates{res} + [u(locality+res_chunk_size*(res-1)+1:...
+                        locality+res_chunk_size*res, :);dau(locality+res_chunk_size*(res-1)+1:...
+                        locality+res_chunk_size*res, :)]*augmented_states{res}';
             states_trstates{res} = states_trstates{res} + augmented_states{res}*augmented_states{res}';
 
-            states{res}(:,1) = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},end)+resnoise*noise(res_chunk{res},end)));
+            states{res}(:,1) = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*([u(res_chunk{res},end);dau(res_chunk{res},end)]+resnoise*[noise(res_chunk{res},end);noise(res_chunk{res},end)]));
         end
     end
 end
@@ -551,8 +564,10 @@ spmd(pool_size)
 %% Use full system to make predictions
     if labindex == 1
         prediction = cell(resparams.predictions,1);
+        prediction_da = cell(resparams.predictions,1);
         for j = 1:resparams.predictions
             prediction{j} =  zeros(num_inputs, resparams.predict_length);
+            prediction_da{j} = zeros(num_inputs, resparams.predict_length);
         end
     end
 
@@ -561,12 +576,15 @@ spmd(pool_size)
             x{res} = zeros(size(x{res}));
         end
         if labindex == 1
-            test_input = datavar.*tm.test_input_sequence(start_iter(j):start_iter(j)+resparams.sync_length-1,:)'+datamean;
+            test_input = da_datavar.*tm.da_test_input_sequence(start_iter(j):start_iter(j)+resparams.sync_length-1,:)'+da_datamean;
         end
         %% First, we synchronize the reservoir system to the test data using
         % a short synchronization sequence
         for i=1:resparams.sync_length
-            feedback = GetDataChunk(start_iter(j)+(i-1),tm,'test_input_sequence',...
+            feedback_u = GetDataChunk(start_iter(j)+(i-1),tm,'test_input_sequence',...
+                core_chunk_size,locality,chunk_begin(1),chunk_end(end),...
+                rear_overlap(1,:), forward_overlap(end,:));
+            feedback_dau = GetDataChunk(start_iter(j)+(i-1),tm,'da_test_input_sequence',...
                 core_chunk_size,locality,chunk_begin(1),chunk_end(end),...
                 rear_overlap(1,:), forward_overlap(end,:));
 
@@ -594,45 +612,54 @@ spmd(pool_size)
                 local_model(locality+1:locality+core_chunk_size) = global_model_forecast(chunk_begin(1):chunk_end(end),1);
             end
             for res = 1:res_per_core
-                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*feedback(res_chunk{res}));
+                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*[feedback_u(res_chunk{res});feedback_dau(res_chunk{res})]);
             end
         end
         % Obtain initial condition for prediction
         x_ = cell(res_per_core,1);
         augmented_x = cell(res_per_core,1);
-        out = zeros(core_chunk_size,1);
+        out_u = zeros(core_chunk_size,1);
+        out_dau = zeros(core_chunk_size,1);
         for res = 1:res_per_core
             x_{res} = x{res};
             x_{res}(2:2:resparams.N) = x_{res}(2:2:resparams.N).^2;
 
             if strcmp(typeflag, 'hybrid')
                 augmented_x{res} = vertcat((local_model(locality+res_chunk_size*(res-1)+1:...
-                    locality+res_chunk_size*res) - datamean)./datavar, x_{res});
+                    locality+res_chunk_size*res) - da_datamean)./da_datavar, x_{res});
             elseif strcmp(typeflag, 'reservoir')
                 augmented_x{res} = x_{res};
             end
-            out(res_chunk_size*(res-1)+1:res_chunk_size*res) = wout{res}*augmented_x{res};
+            temp_out = wout{res}*augmented_x{res};
+            out_u(res_chunk_size*(res-1)+1:res_chunk_size*res) = temp_out(1:end/2);
+            out_dau(res_chunk_size*(res-1)+1:res_chunk_size*res) = temp_out(end/2+1:end);
         end
         labBarrier;
-        concatenated_out = gcat(out, 1);
+        concatenated_out_u = gcat(out_u, 1);
+        concatenated_out_dau = gcat(out_dau, 1);
         
         %% Predict out to a time PredictLength*(\Delta t)
         for pred_idx = 1:resparams.predict_length
             % Get local region from global prediction
-            feedback = zeros(input_size,1);
-
+            feedback_u = zeros(input_size,1);
+            feedback_dau = zeros(input_size,1);
             if locality > 0
-                feedback(1:locality) = concatenated_out(rear_overlap(1,:));
+                feedback_u(1:locality) = concatenated_out_u(rear_overlap(1,:));
 
-                feedback(locality+core_chunk_size+1:2*locality+core_chunk_size) = concatenated_out(forward_overlap(end,:));
+                feedback_u(locality+core_chunk_size+1:2*locality+core_chunk_size) = concatenated_out_u(forward_overlap(end,:));
+                
+                feedback_dau(1:locality) = concatenated_out_dau(rear_overlap(1,:));
+
+                feedback_dau(locality+core_chunk_size+1:2*locality+core_chunk_size) = concatenated_out_dau(forward_overlap(end,:));
             end
 
-            feedback(locality+1:locality+core_chunk_size) = concatenated_out(chunk_begin(1):chunk_end(end));
+            feedback_u(locality+1:locality+core_chunk_size) = concatenated_out_u(chunk_begin(1):chunk_end(end));
+            feedback_dau(locality+1:locality+core_chunk_size) = concatenated_out_dau(chunk_begin(1):chunk_end(end));
             
             % If CHyPP, then obtain the local knowledge-based prediction
             if strcmp(typeflag, 'hybrid')
                 if labindex == 1
-                    forecast_out = ModelParams.predict( datavar.*concatenated_out + datamean, ModelParams);
+                    forecast_out = ModelParams.predict( da_datavar.*concatenated_out_dau + da_datamean, ModelParams);
                     global_model_forecast = labBroadcast(1,forecast_out);
 
                 else
@@ -654,7 +681,7 @@ spmd(pool_size)
             % Obtain prediction from each reservoir and concatenate all of
             % regions for each worker together.
             for res = 1:res_per_core
-                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*feedback(res_chunk{res}));
+                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*[feedback_u(res_chunk{res});feedback_dau(res_chunk{res})]);
                 x_{res} = x{res};
                 x_{res}(2:2:resparams.N) = x_{res}(2:2:resparams.N).^2;
 
@@ -665,16 +692,19 @@ spmd(pool_size)
                     augmented_x{res} = x_{res};
                 end
         %        out = local_model(locality+1:locality+res_chunk_size,:);
-                out(res_chunk_size*(res-1)+1:res_chunk_size*res) = wout{res}*augmented_x{res};
+                temp_out = wout{res}*augmented_x{res};
+                out_u(res_chunk_size*(res-1)+1:res_chunk_size*res) = temp_out(1:end/2);
+                out_dau(res_chunk_size*(res-1)+1:res_chunk_size*res) = temp_out(end/2+1:end);
             end
             labBarrier;
             
             % Send full state to all workers
-            concatenated_out = gcat(out, 1);  
-            
+            concatenated_out_u = gcat(out_u, 1);  
+            concatenated_out_dau = gcat(out_dau, 1); 
             % Record prediction
             if labindex == 1
-                prediction{j}(:,pred_idx) = concatenated_out;
+                prediction{j}(:,pred_idx) = concatenated_out_u;
+                prediction_da{j}(:,pred_idx) = concatenated_out_dau;
             end
 
         end
@@ -685,6 +715,7 @@ end
 reservoir_size = reservoir_size{1};
 
 savepred = prediction{1};
+savepred_da = prediction_da{1};
 resparams = resparams{1};
 Woutmat = {};
 Amat = {};
@@ -706,19 +737,21 @@ end
 beta_reservoir = rp.beta_reservoir;
 start_iter = start_iter{1};
 if strcmp(typeflag_in, 'hybrid')
-    filename = [outputlocation,'/','hybrid', '-numres', num2str(num_res_in), ...
+    filename = [outputlocation,'/','DA-hybrid', '-numres', num2str(num_res_in), ...
         'res', num2str(reservoir_size), ...
         'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
         strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
-        'leakage',strrep(num2str(leakage_in),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
-        'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_data.mat'];
+        'leakage',strrep(num2str(leakage_in),'.',''),'covinf',num2str(covariance_inflation),...
+            'betares',strrep(num2str(beta_reservoir),'.',''),...
+            'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_data.mat'];
 elseif strcmp(typeflag_in, 'reservoir')
-    filename = [outputlocation,'/','reservoir', '-numres', num2str(num_res_in), ...
+    filename = [outputlocation,'/','DA-reservoir', '-numres', num2str(num_res_in), ...
         'res', num2str(reservoir_size), ...
         'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
         strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
-        'leakage',strrep(num2str(leakage_in),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
-        'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_data.mat'];
+        'leakage',strrep(num2str(leakage_in),'.',''),'covinf',num2str(covariance_inflation),...
+            'betares',strrep(num2str(beta_reservoir),'.',''),...
+            'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_data.mat'];
 end
 
 tm = matfile(testfilename_in);
@@ -726,9 +759,9 @@ tm = matfile(testfilename_in);
 %% Output predictions and CHyPP parameters
 if ifsavepred
     if isstruct(ModelParams)
-        save(filename, 'savepred','resparams','start_iter', 'Woutmat','Amat','winmat','ModelParams');
+        save(filename, 'savepred','savepred_da','resparams','start_iter', 'Woutmat','Amat','winmat','ModelParams');
     else
-        save(filename, 'savepred','resparams','start_iter', 'Woutmat','Amat','winmat');
+        save(filename, 'savepred','savepred_da','resparams','start_iter', 'Woutmat','Amat','winmat');
     end
 end
 
@@ -801,18 +834,20 @@ if ifsaverms
 end
 %% Set rms data output file name and safe it specified
 if strcmp(typeflag_in, 'hybrid')
-    filename_rms = [outputlocation,'/','hybrid', '-numres', num2str(num_res_in), ...
+    filename_rms = [outputlocation,'/','DA-hybrid', '-numres', num2str(num_res_in), ...
             'res', num2str(reservoir_size), ...
             'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
             strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
-            'leakage',strrep(num2str(leakage_in),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
+            'leakage',strrep(num2str(leakage_in),'.',''),'covinf',num2str(covariance_inflation),...
+            'betares',strrep(num2str(beta_reservoir),'.',''),...
             'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_rms.mat'];
 elseif strcmp(typeflag_in, 'reservoir')
-    filename_rms = [outputlocation,'/','reservoir', '-numres', num2str(num_res_in), ...
+    filename_rms = [outputlocation,'/','DA-reservoir', '-numres', num2str(num_res_in), ...
             'res', num2str(reservoir_size), ...
             'localoverlap',num2str(locality{1}),'trainlen',num2str(train_lengthin),'sigma',...
             strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
-            'leakage',strrep(num2str(leakage_in),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
+            'leakage',strrep(num2str(leakage_in),'.',''),'covinf',num2str(covariance_inflation),...
+            'betares',strrep(num2str(beta_reservoir),'.',''),...
             'runiter',num2str(runiterin),'_wnoise',strrep(num2str(resnoise{1}),'.',''),'_rms.mat'];
 end
 if ifsaverms

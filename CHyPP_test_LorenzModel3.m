@@ -43,10 +43,14 @@ ResOnly = false;
 Noise = 0.085;
 RunIter = 1;
 OutputData = true;
-TrainFile = 'LorenzModel3_Data/M3_train_input_sequence.mat';
-TestFile = 'LorenzModel3_Data/M3_test_input_sequence.mat';
-StartFile = 'LorenzModel3_Data/M3_pred_start_indices.mat';
-OutputLocation = 'LorenzModel3_Data';
+TrainFile = ['/lustre/awikner1/LorenzModel3/N960K32I12F15wnoiseNskip',num2str(Nskip),...
+    '_1/train_input_sequence.mat'];
+TestFile = ['/lustre/awikner1/LorenzModel3/N960K32I12F15wnoiseNskip',num2str(Nskip),...
+    '_1/test_input_sequence.mat'];
+StartFile = ['/lustre/awikner1/LorenzModel3/N960K32I12F15wnoiseNskip',num2str(Nskip),...
+    '_1/pred_start_indices_200000.mat'];
+OutputLocation = ['/lustre/awikner1/LorenzModel3/N960K32I12F15wnoiseNskip',num2str(Nskip),...
+    '_1'];
 ErrorCutoff = 0.85;
 %% Run the CHyPP prediction using the above parameters
 [avg_pred_length_CHyPP,CHyPP_pred_file,CHyPP_rms_file] = CHyPP('PoolSize',PoolSize,...

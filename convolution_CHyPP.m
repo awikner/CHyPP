@@ -1,4 +1,4 @@
-function [savepred,filename,filename_rms] = CHyPP(varargin)
+function [savepred,filename,filename_rms] = convolution_CHyPP(varargin)
 % CHyPP (Combined Hybrid Parallel Prediction) - executes the CHyPP
 % algorithm (training and prediction) for a 1-Dimensional system using
 % MATLAB's parallel computing toolbox. If you don't have access to this
@@ -187,7 +187,7 @@ predictions_in = 10;
 predict_length_in = 1000;
 train_steps_in = 50;
 error_cutoff = 0.2;
-
+conv_type_in = 'single';
 
 %% Parse inputs, assign to parameters, and check parameter compatibility
 for arg = 1:numel(varargin)/2
@@ -247,6 +247,8 @@ for arg = 1:numel(varargin)/2
             outputlocation = varargin{2*arg};
         case 'ErrorCutoff'
             error_cutoff = varargin{2*arg};
+        case 'ConvolutionType'
+            conv_type_in = varargin{2*arg};
         otherwise
             error(['Input variable ',num2str(arg),' not recognized.'])
     end
@@ -276,6 +278,7 @@ startfilename = Composite(pool_size);
 predictions = Composite(pool_size);
 predict_length = Composite(pool_size);
 train_steps = Composite(pool_size);
+conv_type = Composite(pool_size);
 
 for i = 1:pool_size
     num_res{i} = num_res_in;
@@ -297,6 +300,7 @@ for i = 1:pool_size
     predictions{i} = predictions_in;
     predict_length{i} = predict_length_in;
     train_steps{i} = train_steps_in;
+    conv_type{i} = conv_type_in;
 end
 
 spmd(pool_size)
@@ -396,22 +400,7 @@ spmd(pool_size)
     
     win = cell(res_per_core,1);
     for res = 1:res_per_core
-        win{res} = zeros(resparams.N, input_size);
-
-        for i=1:input_size
-            rng(i)
-            ip = (-1 + 2*rand(q,1));
-            win{res}((i-1)*q+1:i*q,i) = resparams.sigma_data*ip;
-        end
-
-        occupied_nodes = floor(resparams.N/(input_size))*input_size;
-        leftover_nodes = resparams.N - occupied_nodes;
-
-        for i=1:leftover_nodes
-            rng(i+input_size)
-            ip = (-1 + 2*rand);
-            win{res}(occupied_nodes+i,randi([1,input_size])) = resparams.sigma_data*ip;
-        end
+        win{res} = CreateConvolution(input_size,resparams,conv_type);
     end
     
     % Set the length of each training period
@@ -443,23 +432,25 @@ end
 spmd(pool_size)
     if strcmp(typeflag, 'hybrid')
         for i=1:res_per_core
-            data_trstates{i} = zeros(res_chunk_size,resparams.N+res_chunk_size);
-            states_trstates{i} = zeros(resparams.N+res_chunk_size);
+            data_trstates{i} = zeros(res_chunk_size,resparams.N+2*res_chunk_size);
+            states_trstates{i} = zeros(resparams.N+2*res_chunk_size);
         end
     elseif strcmp(typeflag,'reservoir')
         for i=1:res_per_core
-            data_trstates{i} = zeros(res_chunk_size,resparams.N);
-            states_trstates{i} = zeros(resparams.N);
+            data_trstates{i} = zeros(res_chunk_size,resparams.N+res_chunk_size);
+            states_trstates{i} = zeros(resparams.N+res_chunk_size);
         end
     end
     %% Feed in initial training data transient but do not train on resulting states
     res_chunk = cell(res_per_core,1);
+    u_in = cell(res_per_core,1);
     for res = 1:res_per_core
         res_chunk{res} = res_chunk_size*(res-1)+1:res_chunk_size*res+2*locality;
         for i = 1:resparams.discard_length-1
-            x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
+            x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + predict(win{res},u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
         end
         states{res}(:,1) = x{res};
+        u_in{res} = u(res_chunk{res},i);
     end
 end
 
@@ -506,8 +497,8 @@ for k = 1:train_steps{1}
         for res = 1:res_per_core
             for i = 1:train_size-1
                 states{res}(:,i+1) = (1-leakage)*states{res}(:,i)+...
-                    leakage*tanh(A{res}*states{res}(:,i) + win{res}*...
-                    (u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
+                    leakage*tanh(A{res}*states{res}(:,i) + predict(win{res},...
+                    (u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i))));
             end
 
             x{res} = states{res}(:, end);
@@ -517,15 +508,18 @@ for k = 1:train_steps{1}
             % prediction
             if strcmp(typeflag,'hybrid')
                 if k == train_steps
-                    augmented_states{res} = vertcat((model_states(locality+res_chunk_size*(res-1)+1:...
+                    augmented_states{res} = vertcat([u_in{res},u(res_chunk{res},1:train_size-1)],...
+                        (model_states(locality+res_chunk_size*(res-1)+1:...
                         locality+res_chunk_size*res,1:end-1)-datamean)./datavar, states{res});
                     local_model = model_states(:,end);
                 else
-                    augmented_states{res} = vertcat((model_states(locality+res_chunk_size*(res-1)+1:...
+                    augmented_states{res} = vertcat([u_in{res},u(res_chunk{res},1:train_size-1)],...
+                        (model_states(locality+res_chunk_size*(res-1)+1:...
                         locality+res_chunk_size*res,:)-datamean)./datavar, states{res});
                 end
             elseif strcmp(typeflag, 'reservoir')
-                augmented_states{res} = states{res};
+                augmented_states{res} = vertcat([u_in{res},u(res_chunk{res},1:train_size-1)],...
+                    states{res});
             end
             % Use resulting states and training to form outer product
             % matrices.
@@ -533,7 +527,8 @@ for k = 1:train_steps{1}
                         locality+res_chunk_size*res, :)*augmented_states{res}';
             states_trstates{res} = states_trstates{res} + augmented_states{res}*augmented_states{res}';
 
-            states{res}(:,1) = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},end)+resnoise*noise(res_chunk{res},end)));
+            states{res}(:,1) = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + predict(win{res},(u(res_chunk{res},end)+resnoise*noise(res_chunk{res},end))));
+            u_in{res} = u(res_chunk{res},end);
         end
     end
 end
@@ -594,7 +589,7 @@ spmd(pool_size)
                 local_model(locality+1:locality+core_chunk_size) = global_model_forecast(chunk_begin(1):chunk_end(end),1);
             end
             for res = 1:res_per_core
-                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*feedback(res_chunk{res}));
+                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + predict(win{res},feedback(res_chunk{res})));
             end
         end
         % Obtain initial condition for prediction
@@ -606,10 +601,10 @@ spmd(pool_size)
             x_{res}(2:2:resparams.N) = x_{res}(2:2:resparams.N).^2;
 
             if strcmp(typeflag, 'hybrid')
-                augmented_x{res} = vertcat((local_model(locality+res_chunk_size*(res-1)+1:...
+                augmented_x{res} = vertcat(feedback(res_chunk{res}),(local_model(locality+res_chunk_size*(res-1)+1:...
                     locality+res_chunk_size*res) - datamean)./datavar, x_{res});
             elseif strcmp(typeflag, 'reservoir')
-                augmented_x{res} = x_{res};
+                augmented_x{res} = vertcat(feedback(res_chunk{res}),x_{res});
             end
             out(res_chunk_size*(res-1)+1:res_chunk_size*res) = wout{res}*augmented_x{res};
         end
@@ -654,15 +649,15 @@ spmd(pool_size)
             % Obtain prediction from each reservoir and concatenate all of
             % regions for each worker together.
             for res = 1:res_per_core
-                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*feedback(res_chunk{res}));
+                x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + predict(win{res},feedback(res_chunk{res})));
                 x_{res} = x{res};
                 x_{res}(2:2:resparams.N) = x_{res}(2:2:resparams.N).^2;
 
                 if strcmp(typeflag, 'hybrid')
-                    augmented_x{res} = vertcat((local_model(locality+res_chunk_size*(res-1)+1:...
+                    augmented_x{res} = vertcat(feedback(res_chunk{res}),(local_model(locality+res_chunk_size*(res-1)+1:...
                         locality+res_chunk_size*res) - datamean)./datavar, x_{res});
                 elseif strcmp(typeflag, 'reservoir')
-                    augmented_x{res} = x_{res};
+                    augmented_x{res} = vertcat(feedback(res_chunk{res}),x_{res});
                 end
         %        out = local_model(locality+1:locality+res_chunk_size,:);
                 out(res_chunk_size*(res-1)+1:res_chunk_size*res) = wout{res}*augmented_x{res};

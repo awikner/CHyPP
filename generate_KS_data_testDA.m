@@ -1,4 +1,4 @@
-function generate_KS_data(ModelParams,predict_length)
+function generate_KS_data_testDA(ModelParams,predict_length)
 % generate_KS_data - generates training and testing time series data from
 % the Kuramoto-Sivashinsky equation.
 % Inputs:
@@ -26,7 +26,7 @@ function generate_KS_data(ModelParams,predict_length)
 % random initial condition.
 dataseed = 5;
 rng(dataseed);
-nsteps = 120000;
+nsteps = 150000;
 nstepstest = 30000;
 sync_length = 100;
 x = 0.6*(-1+2*rand(ModelParams.N,1));
@@ -58,8 +58,9 @@ end
 
 % Normalize both sets by the mean and variance of the training data
 datamean = mean(train_input_sequence(:));
-
+da_datamean = datamean;
 datavar = std(train_input_sequence(:));
+da_datavar = datavar;
 
 train_input_sequence = train_input_sequence - datamean;
 
@@ -68,6 +69,9 @@ train_input_sequence = train_input_sequence./datavar;
 test_input_sequence = test_input_sequence - datamean;
 
 test_input_sequence= test_input_sequence./datavar;
+
+da_test_input_sequence = test_input_sequence;
+da_train_input_sequence = train_input_sequence;
 
 % Generate random starting points for prediction
 iterseed = 10;
@@ -83,6 +87,6 @@ noise = randn(size(train_input_sequence,1),size(train_input_sequence,2));
 % Save all data
 mkdir('KS_Data')
 addpath KS_Data
-save('KS_Data/KS_train_input_sequence.mat', 'train_input_sequence', 'noise','datamean', 'datavar', '-v7.3')
-save('KS_Data/KS_test_input_sequence.mat', 'test_input_sequence', 'datamean', 'datavar', '-v7.3')
+save('KS_Data/KS_train_input_sequence.mat', 'train_input_sequence', 'da_train_input_sequence','noise','datamean','da_datamean', 'datavar','da_datavar', '-v7.3')
+save('KS_Data/KS_test_input_sequence.mat', 'test_input_sequence', 'da_test_input_sequence','datamean', 'da_datamean','datavar','da_datavar', '-v7.3')
 save('KS_Data/KS_pred_start_indices.mat','start_iter','-v7.3')

@@ -1,4 +1,4 @@
-function [avg_pred_length,filename,filename_rms] = CHyPP_serial(varargin)
+function [savepred,filename,filename_rms] = CHyPP_serial(varargin)
 % CHyPP (Combined Hybrid Parallel Prediction) - executes the CHyPP
 % algorithm (training and prediction) for a 1-Dimensional system using only
 % one processor core. If you have access to the MATLAB parallel computing
@@ -172,8 +172,8 @@ beta_res = 1e-4;
 beta_model = 1e-4;
 resnoise = 0;
 runiter = 1;
-ifsavepred = true;
-ifsaverms = true;
+ifsavepred = false;
+ifsaverms = false;
 trainfilename = 'KS_Data/KS_train_input_sequence.mat';
 testfilename = 'KS_Data/KS_test_input_sequence.mat';
 startfilename = 'KS_Data/KS_pred_start_indices.mat';
@@ -227,6 +227,7 @@ for arg = 1:numel(varargin)/2
             runiter = varargin{2*arg};
         case 'OutputData'
             ifsavepred = varargin{2*arg};
+        case 'OutputRMS'
             ifsaverms = varargin{2*arg};
         case 'TrainFile'
             trainfilename = varargin{2*arg};
@@ -592,7 +593,7 @@ end
 if isstruct(TestModelParams)
     TestModelParams.nstep = resparams.predict_length;
     model_pred_length = zeros(1,resparams.predictions);
-    model_average_diff = zeros(1,TestModelParams.nstep);
+    model_average_diff = zeros(TestModelParams.nstep,1);
     model_err  = cell(1,resparams.predictions);
 end
 
@@ -600,67 +601,67 @@ prediction_average_diff = zeros(1,resparams.predict_length);
 pred_length = zeros(1,resparams.predictions);
 prediction_err = cell(1,resparams.predictions);
 prediction_err_sum = 0;
+if ifsaverms
+    for i=1:resparams.predictions
+        if isstruct(TestModelParams)
+            xinit = savepred{i}(:,1).*datavar+datamean;
+            model_sequence = TestModelParams.prediction(xinit, TestModelParams);
 
-for i=1:resparams.predictions
-    if isstruct(TestModelParams)
-        xinit = savepred{i}(:,1).*datavar+datamean;
-        data1 = TestModelParams.prediction( xinit, TestModelParams);
+            model_sequence = model_sequence - datamean;
+            model_sequence = model_sequence./datavar;
+            model_err{i}    = sqrt(mean((model_sequence-...
+                tm.test_input_sequence(start_iter(i)+resparams.sync_length+1:...
+                start_iter(i)+resparams.sync_length+resparams.predict_length,:)').^2,2)');
+            model_average_diff = model_average_diff + model_err{i}/(resparams.predictions);
 
-        model_sequence = transpose(data1);
-        model_sequence = model_sequence - datamean;
-        model_sequence = model_sequence./datavar;
-        model_err{i}    = sqrt(mean((model_sequence-...
-            tm.test_input_sequence(start_iter(i)+resparams.sync_length+1:...
-            start_iter(i)+resparams.sync_length+resparams.predict_length,:)).^2,2)');
-        model_average_diff = model_average_diff + model_err{i}/(resparams.predictions);
-
-        for j=1:length(model_err{i})
-            if model_err{i}(j) > error_cutoff
-                model_pred_length(i) = j-1;
-                break
+            for j=1:length(model_err{i})
+                if model_err{i}(j) > error_cutoff
+                    model_pred_length(i) = j-1;
+                    break
+                end
             end
         end
-    end
 
-    prediction_err{i} = sqrt(mean((savepred{i}'-...
-        tm.test_input_sequence(start_iter(i)+...
-        resparams.sync_length+1:start_iter(i)+resparams.sync_length...
-        +resparams.predict_length,:)).^2,2)');
-    for j=1:length(prediction_err{i})
-        if prediction_err{i}(j) > error_cutoff
-            pred_length(i) = j-1;
-            break
-        elseif j == length(prediction_err{i}) && prediction_err{i}(j) <= error_cutoff
-            pred_length(i) = j;
+        prediction_err{i} = sqrt(mean((savepred{i}'-...
+            tm.test_input_sequence(start_iter(i)+...
+            resparams.sync_length+1:start_iter(i)+resparams.sync_length...
+            +resparams.predict_length,:)).^2,2)');
+        for j=1:length(prediction_err{i})
+            if prediction_err{i}(j) > error_cutoff
+                pred_length(i) = j-1;
+                break
+            elseif j == length(prediction_err{i}) && prediction_err{i}(j) <= error_cutoff
+                pred_length(i) = j;
+            end
         end
+        prediction_err_sum = prediction_err_sum + sum(prediction_err{i})/resparams.predictions;
+        prediction_average_diff = prediction_average_diff + prediction_err{i};
+
     end
-    prediction_err_sum = prediction_err_sum + sum(prediction_err{i})/resparams.predictions;
-    prediction_average_diff = prediction_average_diff + prediction_err{i};
 
-end
-
-prediction_average_diff = prediction_average_diff/resparams.predictions;
-avg_pred_length = mean(pred_length);
-std_pred_length = std(pred_length);
-if isstruct(TestModelParams)
-    model_avg_pred_length = mean(model_pred_length);
-    model_std_pred_length = std(model_pred_length);
-end
-%% Set rms data output file name and safe it specified
-if strcmp(typeflag, 'hybrid')
-    filename_rms = [outputlocation,'/','hybrid', '-numres', num2str(num_res), ...
-            'res', num2str(reservoir_size), ...
-            'localoverlap',num2str(locality),'trainlen',num2str(train_length),'sigma',...
-            strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
-            'leakage',strrep(num2str(leakage),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
-            'runiter',num2str(runiter),'_wnoise',strrep(num2str(resnoise),'.',''),'_rms_serial.mat'];
-elseif strcmp(typeflag, 'reservoir')
-    filename_rms = [outputlocation,'/','reservoir', '-numres', num2str(num_res), ...
-            'res', num2str(reservoir_size), ...
-            'localoverlap',num2str(locality),'trainlen',num2str(train_length),'sigma',...
-            strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
-            'leakage',strrep(num2str(leakage),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
-            'runiter',num2str(runiter),'_wnoise',strrep(num2str(resnoise),'.',''),'_rms_serial.mat'];
+    prediction_average_diff = prediction_average_diff/resparams.predictions;
+    avg_pred_length = mean(pred_length);
+    std_pred_length = std(pred_length);
+    if isstruct(TestModelParams)
+        model_avg_pred_length = mean(model_pred_length);
+        model_std_pred_length = std(model_pred_length);
+    end
+    %% Set rms data output file name and safe it specified
+    if strcmp(typeflag, 'hybrid')
+        filename_rms = [outputlocation,'/','hybrid', '-numres', num2str(num_res), ...
+                'res', num2str(reservoir_size), ...
+                'localoverlap',num2str(locality),'trainlen',num2str(train_length),'sigma',...
+                strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
+                'leakage',strrep(num2str(leakage),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
+                'runiter',num2str(runiter),'_wnoise',strrep(num2str(resnoise),'.',''),'_rms_serial.mat'];
+    elseif strcmp(typeflag, 'reservoir')
+        filename_rms = [outputlocation,'/','reservoir', '-numres', num2str(num_res), ...
+                'res', num2str(reservoir_size), ...
+                'localoverlap',num2str(locality),'trainlen',num2str(train_length),'sigma',...
+                strrep(num2str(resparams.sigma_data),'.',''),'radius',strrep(num2str(resparams.radius),'.',''),...
+                'leakage',strrep(num2str(leakage),'.',''),'betares',strrep(num2str(beta_reservoir),'.',''),...
+                'runiter',num2str(runiter),'_wnoise',strrep(num2str(resnoise),'.',''),'_rms_serial.mat'];
+    end
 end
 if ifsaverms
     if isstruct(TestModelParams)
