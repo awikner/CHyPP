@@ -455,7 +455,7 @@ spmd(pool_size)
     res_chunk = cell(res_per_core,1);
     for res = 1:res_per_core
         res_chunk{res} = res_chunk_size*(res-1)+1:res_chunk_size*res+2*locality;
-        for i = 1:resparams.discard_length-1
+        for i = 1:resparams.discard_length
             x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
         end
         states{res}(:,1) = x{res};
