@@ -8,7 +8,7 @@ function ModelParams = precompute_KS(ModelParams)
 
 if strcmp(ModelParams.modeltype, 'ETDRK')
     % Precompute various ETDRK4 scalar quantities:
-    k = [0:ModelParams.N/2-1 0 -ModelParams.N/2+1:-1]'*(2*pi/ModelParams.d); % wave numbers
+    k = [0:ModelParams.N/2-1, -ModelParams.N/2:-1]'*(2*pi/ModelParams.d); % wave numbers
     L = (1+ModelParams.const)*k.^2 - k.^4; % Fourier multipliers
     ModelParams.E = exp(ModelParams.tau*L); ModelParams.E2 = exp(ModelParams.tau*L/2);
     M = 16; % no. of points for complex means
