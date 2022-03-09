@@ -390,7 +390,7 @@ end
 res_chunk = cell(num_res,1);
 for res = 1:num_res
     res_chunk{res} = [rear_overlap(res,:),chunk_begin(res):chunk_end(res),forward_overlap(res,:)];
-    for i = 1:resparams.discard_length-1
+    for i = 1:resparams.discard_length
         x{res} = (1-leakage)*x{res}+leakage*tanh(A{res}*x{res} + win{res}*(u(res_chunk{res},i)+resnoise*noise(res_chunk{res},i)));
     end
     states{res}(:,1) = x{res};
